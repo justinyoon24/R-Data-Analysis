@@ -1,0 +1,42 @@
+---
+title: "Win Probability Model"
+author: "Yoon, Justin"
+output:
+  pdf_document: default
+---
+
+```{r}
+library(nflfastR)
+library(tidyverse)
+library(caTools)
+seasons <- 2016:2020
+pbp <- nflfastR::load_pbp(seasons)
+pbp
+str(pbp)
+pbp = pbp %>% mutate(winner = ifelse(home_score > away_score, home_team, away_team))
+pbp = pbp %>% mutate(poswins = ifelse(winner == posteam, "Yes","No"))
+pbp$qtr = as.factor(pbp$qtr) 
+pbp$down = as.factor(pbp$down)
+pbp$poswins = as.factor(pbp$poswins)
+pbp_reduced = pbp %>% filter(play_type != "No Play" & qtr != 5 & down != "NA" & poswins != "NA") %>%
+                            select(game_id, game_date, posteam, home_team, away_team, winner, 
+                            qtr,down, ydstogo, game_seconds_remaining, yardline_100, 
+                            score_differential, poswins)
+set.seed(100)
+split = sample.split(pbp_reduced$poswins, SplitRatio = 0.8)
+train = subset(pbp_reduced, split == TRUE)
+test = subset(pbp_reduced, split == FALSE)
+model = glm(poswins ~ qtr + down + ydstogo + game_seconds_remaining + yardline_100 + 
+               score_differential, train, family = "binomial")
+summary(model)
+pred = predict(model, train, type = "response")
+train = cbind(train,pred)
+train = mutate(train, predh = ifelse(posteam == home_team, pred, 1-pred))
+pred2 = predict(model, test, type = "response")
+test = cbind(test,pred2)
+test = mutate(test, predh2 = ifelse(posteam == home_team, pred2, 1-pred2))
+ggplot(filter(train, game_id == "2020_14_BAL_CLE"),aes(x=game_seconds_remaining,y=predh)) + 
+  geom_line(size=2, colour="orange") + scale_x_reverse() + ylim(c(0,1)) + theme_minimal() +
+  xlab("Time Remaining (seconds)") + ylab("Home Win Probability")
+```
+  

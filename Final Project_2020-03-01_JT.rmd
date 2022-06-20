@@ -1,0 +1,215 @@
+---
+title: "Final Project"
+output: html_document
+---
+
+```{r Setup}
+library(nflfastR)
+library(dplyr)
+library(ggplot2)
+library(caTools)
+library(knitr)
+library(corrgram)
+library(regclass)
+library(broom)
+library(pROC)
+library("ROCR")    
+
+options(scipen = 9999)
+```
+
+
+```{r Variables}
+#Bring in data using the NFL API; Use 10 years worth of data
+pbpdata <- nflfastR::load_pbp(2011:2021)
+
+#Filter out no plays, odd plays and plays != 4th down
+pbp4th <- pbpdata %>%
+  filter(
+    down == 4,
+    play_type != 'no_play',
+    play_type != 'qb_kneel',
+    !is.na(play_type)
+  )
+
+#Variables:https://aws.amazon.com/blogs/machine-learning/next-gen-stats-decision-guide-predicting-fourth-down-conversion/
+# Filter out special teams on fourth down and select variables 
+pbpgo <- pbp4th %>%
+  filter(
+    special == 0, 
+    !is.na(first_down)) %>%
+  select(play_type, score_differential, ydstogo, yardline_100, fourth_down_converted, game_seconds_remaining, posteam_timeouts_remaining, defteam_timeouts_remaining, week)
+#Left with 6,097 4th down plays
+
+```
+
+
+
+```{r}
+#EDA
+
+summary(pbpgo) # No NAs
+
+#Check for outliers (found none)/ Univariate Analysis
+
+#Categorical Variables
+
+#Response Variable:Fairly even groups
+kable(table(pbpgo$fourth_down_converted),"simple", col.names=c('Fourth Down Converted', 'Count')) 
+
+#Fairly even groups
+kable(table(pbpgo$play_type),"simple", col.names=c('Play Type', 'Count')) 
+
+#Continuous Variables
+
+#Normal Distribution
+hist(pbpgo$score_differential, col="blue", main="Histogram of Score Differential", xlab="Score Differential")
+
+#Skewed Right Distribution
+hist(pbpgo$ydstogo, col="blue", main="Histogram of Yards To Go", xlab="Yards To Go")
+
+
+
+#Trimodel
+hist(pbpgo$yardline_100, col="blue", main="Histogram of Yardline", xlab="Yardline")
+#Heatmap
+heatmap<-pbpgo
+heatmap$group=cut(pbpgo$yardline_100,  breaks=seq(0,100,by=5))
+heatmap<-heatmap %>% group_by(group) %>% summarise(Attempts=n())
+ggplot(heatmap, aes(y = group, x =1, fill = Attempts)) + geom_tile() +ggtitle("Heatmap of Number of 4th down Attempts")+ylab("Yardline")
+
+
+
+#We are including overtime plays; Distribution is skewed right
+hist(pbpgo$game_seconds_remaining, col="blue", main="Histogram of Game Seconds Remaining", xlab="Game Seconds Remaining")
+
+hist(pbpgo$posteam_timeouts_remaining, col="blue", main="Histogram of Offense Timeouts Remaining", xlab="Offense Timeouts Remaining")
+kable(table(pbpgo$posteam_timeouts_remaining),"simple", col.names=c('Offense Timeouts Remaining', 'Count')) 
+
+hist(pbpgo$defteam_timeouts_remaining, col="blue", main="Histogram of Defense Timeouts Remaining", xlab="Defense Timeouts Remaining")
+kable(table(pbpgo$defteam_timeouts_remaining),"simple", col.names=c('Defense Timeouts Remaining', 'Count')) 
+
+
+#We are including regular and post season; 
+hist(pbpgo$week, col="blue", main="Histogram of Week", xlab="Week of Season")
+#Fairly uniform during the regular season
+kable(table(pbpgo$week),"simple", col.names=c('Week of Season', 'Fourth Down Attempts')) 
+
+#Bivariate Analysis
+corrgram(pbpgo,
+         upper.panel = panel.cor,    # Correlation panel
+         lower.panel = panel.pts,
+         diag.panel=panel.density)
+
+score<-pbpgo
+score$group=cut(pbpgo$score_differential,  breaks=seq(min(pbpgo$score_differential)-1,max(pbpgo$score_differential)+1,by=10))
+score<-score %>% group_by(group) %>% summarise(Attempts=n())
+ggplot(score, aes(x = group, y =Attempts)) +
+  geom_bar(stat = 'identity') +
+  xlab('Score Differential') +
+  ylab('Attempts') +
+  ggtitle('Fourth Down Conversion Attempts by Score Differential')
+
+yds<-pbpgo
+yds$group=cut(yds$ydstogo,  breaks=seq(min(pbpgo$ydstogo)-1,max(pbpgo$ydstogo)+10,by=2))
+yds2<-yds %>% group_by(group) %>% summarise(Attempts=n())
+yds2<-yds2[c(1:8),]
+ggplot(yds2, aes(x = group, y =Attempts)) +
+  geom_bar(stat = 'identity', fill="blue") +
+  xlab('Yards To Go') +
+  ylab('Attempts') +
+  ggtitle('Fourth Down Conversion Attempts by Yards To Go')
+
+
+kable(table(yds$group,yds$play_type),"simple")
+
+#Change response variable to binary
+pbpgo$fourth_down_converted<-as.factor(pbpgo$fourth_down_converted)
+pbpgo$play_type<-as.factor(pbpgo$play_type)
+```
+
+```{r Regression Model}
+#Split into train/test dataset (80/20)
+
+set.seed(123)
+
+split = sample.split(pbpgo$fourth_down_converted, SplitRatio = 0.8)
+
+train = pbpgo %>%
+  filter(split == TRUE)
+
+test = pbpgo %>%
+  filter(split == FALSE)
+
+#Fit logistic model
+
+model1 <- glm(fourth_down_converted ~ play_type + score_differential + ydstogo + yardline_100 + game_seconds_remaining + posteam_timeouts_remaining + defteam_timeouts_remaining + week, data = pbpgo, family = "binomial")
+
+summary(model1)
+
+```
+
+
+
+```{r}
+#Evaluate
+pred1 <- predict(model1, train, type = "response")
+
+train <- cbind(train, pred1)
+
+pred2 <- predict(model1, test, type = "response")
+
+test <- cbind(test, pred2)
+
+
+AUC1=auc(train$fourth_down_converted, pred1)#0.6722
+AUC2=auc(test$fourth_down_converted, pred2)#0.694
+
+pred <- prediction(pred1, train$fourth_down_converted) 
+perf <- performance(pred, measure = "tpr", x.measure = "fpr")     
+plot(perf, col=rainbow(7), main="ROC Curve 4th down On Training", xlab="Specificity", 
+     ylab="Sensitivity")    
+text(.2,.9, labels = paste("AUC: ",round(AUC1,2)))
+abline(0, 1) #add a 45 degree line
+
+
+pred2 <- prediction(pred2, test$fourth_down_converted) 
+perf <- performance(pred2, measure = "tpr", x.measure = "fpr")     
+plot(perf, col=rainbow(7), main="ROC Curve 4th down On Test", xlab="Specificity", 
+     ylab="Sensitivity")
+text(.2,.9, labels = paste("AUC: ",round(AUC2,2)))
+abline(0, 1) #add a 45 degree line
+
+```
+
+
+
+```{r}
+#Check Assumptions
+
+#Reference: http://www.sthda.com/english/articles/36-classification-methods-essentials/148-logistic-regression-assumptions-and-diagnostics-in-r/
+
+
+#Check linearity assumption: each predictor vs logit(y)
+subset <- train %>%
+  dplyr::select_if(is.numeric) 
+predictors <- colnames(subset)
+
+
+subset<- subset %>%
+  mutate(logit = log(pred1/(1-pred1)))
+
+par(mfrow=c(2,2))
+plot(subset$logit, subset$ydstogo, main="Scatterplot logit vs Yd To Go", xlab="logit", ylab="Yd To Go",cex.main=.8)
+plot(subset$logit, subset$yardline_100, main="Scatterplot logit vs Yardline", xlab="logit", ylab="Yardline",cex.main=.8)
+plot(subset$logit, subset$game_seconds_remaining, main="Scatterplot logit vs Sec Remaining", xlab="logit", ylab="Sec Remaining",cex.main=.8)
+plot(subset$logit, subset$score_differential, main="Scatterplot logit vs Score Diff", xlab="logit", ylab="Score Diff",cex.main=.8)
+
+#Check multicolinearity: no issue all less than 5
+car::vif(model1)
+
+```
+
+
+
+
